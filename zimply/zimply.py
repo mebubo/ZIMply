@@ -790,7 +790,8 @@ class ZIMRequestHandler:
                     redirects = [entry for entry in redirects if
                                  entry['redirectIndex'] not in indexes]
 
-                    entries = [*entries, *redirects]
+                    from itertools import chain 
+                    entries = list(chain(entries, redirects))
                     titles = [entry['title'] for entry in entries]
                     scores = self.bm25.calculate_scores(keywords, titles)
                     weighted_result = sorted(zip(scores, entries),
@@ -863,7 +864,7 @@ class ZIMServer:
             logging.info("No index was found at " + str(index_file) +
                          ", so now creating the index.")
             print("Please wait as the index is created, "
-                  "this can take quite some time! – " + time.strftime('%X %x'))
+                  "this can take quite some time! - " + time.strftime('%X %x'))
 
             db = sqlite3.connect(index_file)
             cursor = db.cursor()
@@ -883,7 +884,7 @@ class ZIMServer:
             # once all articles are added, commit the changes to the database
             db.commit()
 
-            print("Index created, continuing – " + time.strftime('%X %x'))
+            print("Index created, continuing - " + time.strftime('%X %x'))
             db.close()
         # return an open connection to the SQLite database
         return sqlite3.connect(index_file)
