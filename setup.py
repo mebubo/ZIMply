@@ -3,7 +3,7 @@ from setuptools import setup
 setup(
         name='zimply',
         packages=['zimply'],
-        version='1.1.2',
+        version='1.1.4',
         description="ZIMply is an easy to use, offline reader for Wikipedia - as well as other ZIM files - which provides access "
                     "to them through any ordinary browser.",
         long_description="ZIMply is an easy to use, offline reader for Wikipedia - as well as other ZIM files - which provides access "
@@ -16,7 +16,7 @@ setup(
         author_email="kim.bauters@gmail.com",
         license='MIT',
         url="https://github.com/kimbauters/ZIMply",
-        download_url='https://github.com/kimbauters/ZIMply/tarball/1.1.2',
+        download_url='https://github.com/kimbauters/ZIMply/tarball/1.1.4',
         keywords=['zim', 'wiki', 'wikipedia'],
         install_requires=["gevent>=1.1.1", "falcon>=1.0.0", "mako>=1.0.3", "zstandard>=0.14.1"],
         classifiers=[
