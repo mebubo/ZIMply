@@ -18,7 +18,7 @@ setup(
         url="https://github.com/kimbauters/ZIMply",
         download_url='https://github.com/kimbauters/ZIMply/tarball/1.1.2',
         keywords=['zim', 'wiki', 'wikipedia'],
-        install_requires=["gevent>=1.1.1", "falcon>=1.0.0", "mako>=1.0.3"],
+        install_requires=["gevent>=1.1.1", "falcon>=1.0.0", "mako>=1.0.3", "zstandard>=0.14.1"],
         classifiers=[
             'Programming Language :: Python :: 3.4',
             'License :: OSI Approved :: MIT License',

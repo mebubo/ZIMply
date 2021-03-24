@@ -42,6 +42,7 @@ monkey.patch_all()
 import io
 import logging
 import lzma
+import zstandard
 import os
 import pkg_resources
 import re
@@ -243,8 +244,8 @@ class ClusterData(object):
         self.offset = offset  # store the offset
         cluster_info = ClusterBlock(encoding).unpack_from_file(
             self.file, self.offset)  # Get the cluster fields.
-        # Verify whether the cluster has LZMA2 compression
-        self.compressed = cluster_info['compressionType'] == 4
+        # Verify whether the cluster has compression
+        self.compression = {4: "lzma", 5: "zstd"}.get(cluster_info['compressionType'], False)
         # at the moment, we don't have any uncompressed data
         self.uncompressed = None
         self._decompress()  # decompress the contents as needed
@@ -255,7 +256,7 @@ class ClusterData(object):
         self._read_offsets()
 
     def _decompress(self, chunk_size=32768):
-        if self.compressed:
+        if self.compression == "lzma":
             # create a bytes stream to store the uncompressed cluster data
             self.buffer = io.BytesIO()
             decompressor = lzma.LZMADecompressor()  # prepare the decompressor
@@ -268,11 +269,26 @@ class ClusterData(object):
                 data = decompressor.decompress(chunk)  # decompress the chunk
                 self.buffer.write(data)  # and store it in the buffer area
 
+        elif self.compression == "zstd":
+            # create a bytes stream to store the uncompressed cluster data
+            self.buffer = io.BytesIO()
+            decompressor = zstandard.ZstdDecompressor().decompressobj()  # prepare the decompressor
+            # move the file pointer to the start of the blobs as long as we
+            # don't reach the end of the stream.
+            self.file.seek(self.offset + 1)
+            while True:
+                chunk = self.file.read(chunk_size)  # read in a chunk
+                try:
+                    data = decompressor.decompress(chunk)  # decompress the chunk
+                    self.buffer.write(data)  # and store it in the buffer area
+                except zstandard.ZstdError as e:
+                    break
+
     def _source_buffer(self):
         # get the file buffer or the decompressed buffer
-        buffer = self.buffer if self.compressed else self.file
+        buffer = self.buffer if self.compression else self.file
         # move the buffer to the starting position
-        buffer.seek(0 if self.compressed else self.offset + 1)
+        buffer.seek(0 if self.compression else self.offset + 1)
         return buffer
 
     def _read_offsets(self):
