@@ -744,7 +744,7 @@ class ZIMRequestHandler:
 
         template = Template(filename=ZIMRequestHandler.template)
         result = body = head = title = ""  # preset all template variables
-        if success:  # if succesdsful, i.e. we found the requested resource
+        if success:  # if successful, i.e. we found the requested resource
             response.status = falcon.HTTP_200  # respond with a success code
             # set the content type based on the article mimetype
             response.content_type = "text/HTML" if search else article.mimetype
