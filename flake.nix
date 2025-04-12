@@ -7,9 +7,9 @@
 
   outputs = { self, nixpkgs }:
     {
-      nixosModules.default = { pkgs, ... }:
+      nixosModules.default = { pkgs, lib, config, ... }:
         import ./zimply-service.nix {
-          inherit pkgs;
+          inherit pkgs lib config;
         };
     };
 }

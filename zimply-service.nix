@@ -1,4 +1,4 @@
-{ config, lib, pkgs }:
+{ config, pkgs, lib }:
 
 with lib;
 
@@ -47,14 +47,6 @@ in
   };
 
   config = mkIf cfg.enable {
-    assertions = [
-      { assertion = builtins.pathExists templatePath;
-        message = "ZIMply service: Required template file '${templatePath}' does not exist.";
-      }
-      { assertion = builtins.pathExists cfg.zimPath;
-        message = "ZIMply service: zimPath '${toString cfg.zimPath}' does not exist or is not accessible.";
-      }
-    ];
 
     users.users.${userName} = {
       isSystemUser = true;
