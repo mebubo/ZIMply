@@ -61,8 +61,7 @@ import falcon
 
 verbose = False
 
-logging.basicConfig(filename='zimply.log', filemode='w',
-                    format="%(levelname)s: %(message)s",
+logging.basicConfig(format="%(levelname)s: %(message)s",
                     level=logging.DEBUG if verbose else logging.INFO)
 
 #####
@@ -690,9 +689,6 @@ class ZIMRequestHandler:
         """
 
         location = request.relative_uri
-        # replace the escaped characters by their corresponding string values
-        # Double unquote to handle potentially double-encoded URLs
-        location = urllib.parse.unquote(urllib.parse.unquote(location))
         components = location.split("?")
         navigation_location = None
         is_article = True  # assume an article is requested, for now
@@ -718,10 +714,11 @@ class ZIMRequestHandler:
                     self._load_zim_file(zim_name)
 
                 if zim_name in ZIMRequestHandler.zim_files:
+                    active_zim = ZIMRequestHandler.zim_files[zim_name]
+
                     namespace = location.split('/')[1]
                     url = '/'.join(location.split('/')[2:])
 
-                    active_zim = ZIMRequestHandler.zim_files[zim_name]
                     article = active_zim.get_article_by_url(namespace, url)
 
                     if article:
@@ -789,6 +786,8 @@ class ZIMRequestHandler:
                 search = True
                 navigation_location = "search"
                 arguments = re.sub(r"^q=", r"", arguments)
+                # Decode the URL-encoded arguments
+                arguments = urllib.parse.unquote(arguments)
                 keywords = arguments.split("+")
             else:
                 success = False
@@ -837,8 +836,6 @@ class ZIMRequestHandler:
                     m = re.search(r"<title.*?>(.*?)</title>", text, re.S)
                     title = m.group(1) if m else ""
 
-                    # Add a link to return to ZIM selection
-                    body = f'<div style="position:fixed; top:5px; right:5px; background:#eee; padding:5px; border-radius:5px;"><a href="/">ZIM Selection</a> | <b>Current: {zim_name}</b></div>' + body
                     logging.info(f"[{zim_name}] accessing article: {title}")
                 else:
                     result = article.data
@@ -1001,13 +998,13 @@ class ZIMServer:
             logging.warning(f"No ZIM files found in directory {directory_path}")
             print(f"Warning: No ZIM files found in {directory_path}")
 
-        app = falcon.API()
+        app = falcon.App()
         main = ZIMRequestHandler()
         # create a simple sink that forwards all requests
         app.add_sink(main.on_get, prefix='/')
         _address = 'localhost' if ip_address is None else ip_address
-        print(f'ZIMServer running on http://{_address}:{port}')
-        print(f'Found {len(ZIMRequestHandler.available_zims)} ZIM file(s)')
+        logging.info(f'ZIMServer running on http://{_address}:{port}')
+        logging.info(f'Found {len(ZIMRequestHandler.available_zims)} ZIM file(s)')
         # start up the HTTP server on the desired port
         pywsgi.WSGIServer((_address, port), app).serve_forever()
 
