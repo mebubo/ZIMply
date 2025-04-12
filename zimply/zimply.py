@@ -47,7 +47,7 @@ import os
 import re
 import sqlite3
 import time
-import urllib
+import urllib.parse
 from collections import namedtuple
 from functools import partial, lru_cache
 from math import floor, pow, log
@@ -664,16 +664,18 @@ class BM25:
 #####
 
 class ZIMRequestHandler:
-    # provide for a class variable to store the ZIM file object
-    zim = None
-    # provide a class variable to store the index file
-    reverse_index = None
+    # provide for a class variable to store multiple ZIM file objects
+    zim_files = {}
+    # provide a class variable to store the index files
+    index_files = {}
     # provide another class variable to store the schema for the index file
     schema = None
     # store the location of the template file in a class variable
     template = None
     # the encoding, stored in a class variable, for the ZIM file contents
     encoding = ""
+    # store the available zim files
+    available_zims = {}
 
     def __init__(self):
         self.bm25 = BM25()
@@ -689,98 +691,162 @@ class ZIMRequestHandler:
 
         location = request.relative_uri
         # replace the escaped characters by their corresponding string values
-        location = urllib.parse.unquote(location)
+        # Double unquote to handle potentially double-encoded URLs
+        location = urllib.parse.unquote(urllib.parse.unquote(location))
         components = location.split("?")
         navigation_location = None
         is_article = True  # assume an article is requested, for now
-        # if trying for the main page ...
-        if location in ["/", "/index.htm", "/index.html",
-                        "/main.htm", "/main.html"]:
-            # ... return the main page as the article
-            article = ZIMRequestHandler.zim.get_main_page()
+
+        # Handle special resource URLs (images, scripts, etc.)
+        # URLs like /I/image.jpg or /-/script.js that don't have ZIM prefix
+        if location.startswith(("/I/", "/-/", "/A/", "/J/", "/S/", "/M/")):
+            # Try to determine ZIM file from referer header
+            referer = request.headers.get('REFERER', '')
+            zim_name = None
+
+            # Extract ZIM name from referer if available
+            if referer:
+                referer_path = urllib.parse.urlparse(referer).path
+                parts = referer_path.strip('/').split('/')
+                if parts and parts[0] in ZIMRequestHandler.available_zims:
+                    zim_name = parts[0]
+
+            # If we have a ZIM name from referer, try to load and serve from it
+            if zim_name and zim_name in ZIMRequestHandler.available_zims:
+                # Load ZIM if not already loaded
+                if zim_name not in ZIMRequestHandler.zim_files:
+                    self._load_zim_file(zim_name)
+
+                if zim_name in ZIMRequestHandler.zim_files:
+                    namespace = location.split('/')[1]
+                    url = '/'.join(location.split('/')[2:])
+
+                    active_zim = ZIMRequestHandler.zim_files[zim_name]
+                    article = active_zim.get_article_by_url(namespace, url)
+
+                    if article:
+                        response.status = falcon.HTTP_200
+                        response.content_type = article.mimetype
+                        response.data = article.data
+                        return
+
+            # If we couldn't find it using referer, return 404 directly
+            response.status = falcon.HTTP_404
+            response.content_type = "text/plain"
+            response.data = f"Resource {location} not found using referer information"
+            return
+
+        # Check if root URL - serve ZIM selection page
+        if location == "/" or location == "":
+            self._serve_zim_list(response)
+            return
+
+        # Parse URL to determine which ZIM file to use
+        url_parts = location.strip('/').split('/')
+
+        # If URL has no parts, show selection
+        if not url_parts or url_parts[0] == "":
+            self._serve_zim_list(response)
+            return
+
+        # The first part of the URL should be the ZIM name
+        zim_name = url_parts[0]
+
+        # If this is the ZIM selection page
+        if zim_name == "_zim_list":
+            self._serve_zim_list(response)
+            return
+
+        # Load the ZIM file if it's not already loaded
+        if zim_name in ZIMRequestHandler.available_zims and zim_name not in ZIMRequestHandler.zim_files:
+            self._load_zim_file(zim_name)
+
+        # If ZIM file doesn't exist or isn't loaded
+        if zim_name not in ZIMRequestHandler.zim_files:
+            response.status = falcon.HTTP_404
+            response.content_type = "text/HTML"
+            template = Template(filename=ZIMRequestHandler.template)
+            title = "Error"
+            body = f"Requested ZIM file '{zim_name}' not found"
+            result = template.render(location="error", body=body,
+                                   head="", title=title)
+            response.data = bytes(result, encoding=ZIMRequestHandler.encoding)
+            return
+
+        # Get the active ZIM file and index
+        active_zim = ZIMRequestHandler.zim_files[zim_name]
+        active_index = ZIMRequestHandler.index_files[zim_name]
+
+        # Remove the ZIM name from the path to get the actual resource path
+        resource_path = '/' + '/'.join(url_parts[1:])
+
+        # Handle search query
+        search = False
+        keywords = ""
+        if len(components) > 1:
+            arguments = components.pop()
+            if arguments.find("q=") == 0:
+                search = True
+                navigation_location = "search"
+                arguments = re.sub(r"^q=", r"", arguments)
+                keywords = arguments.split("+")
+            else:
+                success = False
+
+        # Get the article from the active ZIM file
+        article = None
+        if resource_path in ["/", "/index.htm", "/index.html", "/main.htm", "/main.html"] or not resource_path:
+            article = active_zim.get_main_page()
             if article is not None:
                 navigation_location = "main"
         else:
-            # The location is given as domain.com/namespace/url/parts/ ,
-            # as used in the ZIM link or, alternatively, as domain.com/page.htm
-            _, namespace, *url_parts = location.split("/")
+            # Parse the URL path
+            parts = resource_path.strip('/').split('/')
+            if len(parts) > 0:
+                if len(parts[0]) > 1:  # Not a namespace
+                    url = parts[0]
+                    namespace = "A"
+                else:
+                    namespace = parts[0]
+                    url = '/'.join(parts[1:])
 
-            # are we dealing with an address bar request, eg. /article_name.htm
-            if len(namespace) > 1:
-                url = namespace  # the namespace is then the URL
-                namespace = "A"  # and the namespace is an article
-            else:
-                # combine all the url parts together again
-                url = "/".join(url_parts)
-            # get the desired article
-            article = ZIMRequestHandler.zim.get_article_by_url(namespace, url)
-            # we have an article when the namespace is A
-            # (i.e. not a photo, etc.)
-            is_article = (namespace == "A")
+                article = active_zim.get_article_by_url(namespace, url)
+                is_article = (namespace == "A")
 
-        # from this point forward, "article" refers to an element in the ZIM
-        # database whereas is_article refers to a Boolean to indicate whether
-        # the "article" is a true article, i.e. a webpage
-        success = True  # assume the request succeeded
-        search = False  # assume we do not have a search
-        keywords = ""  # the keywords to search for
-
-        if not article and len(components) <= 1:
-            # there is no article to be retrieved,
-            # and there is no ? in the URI to indicate a search
-            success = False
-        elif len(components) > 1:  # check if URI of the form main?arguments
-            # retrieve the arguments part by popping the top of the sequence
-            arguments = components.pop()
-            # check if arguments starts with ?q= to indicate a proper search
-            if arguments.find("q=") == 0:
-                search = True  # if so, we have a search
-                navigation_location = "search"  # update navigation location
-                arguments = re.sub(r"^q=", r"", arguments)  # remove the q=
-                keywords = arguments.split("+")  # split all keywords using +
-            else:  # if the required ?q= is not found at the start ...
-                success = False  # not a search, although we thought it was one
-
+        # Process the article or search results
+        success = True if article or search else False
         template = Template(filename=ZIMRequestHandler.template)
-        result = body = head = title = ""  # preset all template variables
-        if success:  # if successful, i.e. we found the requested resource
-            response.status = falcon.HTTP_200  # respond with a success code
-            # set the content type based on the article mimetype
+        result = body = head = title = ""
+
+        if success:
+            response.status = falcon.HTTP_200
             response.content_type = "text/HTML" if search else article.mimetype
 
-            if not navigation_location:  # check if the article location is set
-                    # if not, default to "browse" (non-search, non-main page)
-                    navigation_location = "browse"
+            if not navigation_location:
+                navigation_location = "browse"
 
-            if not search:  # if we did not have a search, but a plain article
+            if not search:
                 if is_article:
-                    text = article.data  # we have an actual article
-                    # decode its contents into a string using its encoding
+                    text = article.data
                     text = text.decode(encoding=ZIMRequestHandler.encoding)
-                    # retrieve the body from the ZIM article
+
                     m = re.search(r"<body.*?>(.*?)</body>", text, re.S)
                     body = m.group(1) if m else ""
-                    # retrieve the head from the ZIM article
                     m = re.search(r"<head.*?>(.*?)</head>", text, re.S)
                     head = m.group(1) if m else ""
-                    # retrieve the title from the ZIM article
                     m = re.search(r"<title.*?>(.*?)</title>", text, re.S)
                     title = m.group(1) if m else ""
-                    logging.info("accessing the article: " + title)
+
+                    # Add a link to return to ZIM selection
+                    body = f'<div style="position:fixed; top:5px; right:5px; background:#eee; padding:5px; border-radius:5px;"><a href="/">ZIM Selection</a> | <b>Current: {zim_name}</b></div>' + body
+                    logging.info(f"[{zim_name}] accessing article: {title}")
                 else:
-                    # just a binary blob, so use it as such
                     result = article.data
-            else:  # if we did have a search form
-                # show the search query in the title
+            else:
                 title = "search results for >> " + " ".join(keywords)
-                logging.info("searching for keywords >> " + " ".join(keywords))
-                # load the parser for the given schema
-                # qp = QueryParser("title", schema=ZIMRequestHandler.schema)
+                logging.info(f"[{zim_name}] searching for keywords >> " + " ".join(keywords))
 
-                # use the keywords to search the index
-                # q = qp.parse(" ".join(keywords))
-
-                cursor = ZIMRequestHandler.reverse_index.cursor()
+                cursor = active_index.cursor()
                 search_for = "* ".join(keywords) + "*"
                 cursor.execute("SELECT docid FROM papers WHERE title MATCH ?",
                                [search_for])
@@ -788,20 +854,17 @@ class ZIMRequestHandler:
                 results = cursor.fetchall()
                 if not results:
                     body = "no results found for: " + " <i>" + " ".join(
-                        keywords) + "</i>"  # ... let the user know
+                        keywords) + "</i>"
                 else:
                     entries = []
                     redirects = []
-                    for row in results:  # ... iterate over all the results
-                        # read the directory entry by index (rather than URL)
-                        entry = self.zim.read_directory_entry_by_index(row[0])
-                        # add the full url to the entry
+                    for row in results:
+                        entry = active_zim.read_directory_entry_by_index(row[0])
                         if entry.get('redirectIndex'):
                             redirects.append(entry)
                         else:
                             entries.append(entry)
                     indexes = set(entry['index'] for entry in entries)
-                    print(indexes)
                     redirects = [entry for entry in redirects if
                                  entry['redirectIndex'] not in indexes]
 
@@ -812,73 +875,63 @@ class ZIMRequestHandler:
                     weighted_result = sorted(zip(scores, entries),
                                              reverse=True, key=lambda x: x[0])
 
+                    # Add the ZIM prefix to all URLs
                     for weight, entry in weighted_result:
-                        print(weight, entry)
-                        body += '<a href="{}">{}</a><br />'.format(
-                            entry['url'], entry['title'])
-
-        else:  # if we did not achieve success
+                        url_with_prefix = f"/{zim_name}/{entry['url']}"
+                        body += f'<a href="{url_with_prefix}">{entry["title"]}</a><br />'
+        else:
             response.status = falcon.HTTP_404
             response.content_type = "text/HTML"
             title = "Page 404"
-            body = "requested resource not found"
+            body = f"Resource '{resource_path}' not found in ZIM file '{zim_name}'"
 
-        if not result:  # if the result hasn't been prefilled ...
+        if not result:
             result = template.render(location=navigation_location, body=body,
-                                     head=head, title=title)  # render template
+                                     head=head, title=title)
             response.data = bytes(result, encoding=ZIMRequestHandler.encoding)
         else:
-            # if result is already filled, push it through as-is
-            # (i.e. binary resource)
             response.data = result
 
+    def _serve_zim_list(self, response):
+        """Serve a page with a list of available ZIM files"""
+        response.status = falcon.HTTP_200
+        response.content_type = "text/HTML"
+        template = Template(filename=ZIMRequestHandler.template)
 
-class ZIMServer:
-    def __init__(self, filename, template, index_file=None, ip_address=None, port=9454, encoding="utf-8"):
-        # create the object to access the ZIM file
-        self._zim_file = ZIMFile(filename, encoding)
-        # get the language of the ZIM file and convert it to ISO639_1 or
-        # default to "en" if unsupported
-        default_iso = bytes("eng", encoding=encoding)
-        iso639 = self._zim_file.metadata().get("language", default_iso) \
-            .decode(encoding=encoding, errors="ignore")
-        lang = iso639_3to1.get(iso639, "en")
-        logging.info("A ZIM file in the language " + str(lang) +
-                     " (ISO639-1) was found, " +
-                     "containing " + str(len(self._zim_file)) + " articles.")
-        if index_file is None:
-            index_file = os.path.join(os.path.dirname(filename), "index.idx")
-        logging.info("The index file is determined to be located at " +
-                     str(index_file) + ".")
+        body = "<h1>Available ZIM Files</h1><ul>"
+        for name, info in ZIMRequestHandler.available_zims.items():
+            # For each ZIM file, link directly to its main page
+            body += f'<li><a href="/{name}/">{name}</a> - {info.get("size", "Unknown size")}</li>'
+        body += "</ul>"
 
-        # set this object to a class variable of ZIMRequestHandler
-        ZIMRequestHandler.zim = self._zim_file
-        # set the index schema to a class variable of ZIMRequestHandler
-        # ZIMRequestHandler.schema = self._schema
-        # set (and create) the index to a class variable
-        ZIMRequestHandler.reverse_index = self._bootstrap(index_file)
-        # set the template to a class variable of ZIMRequestHandler
-        ZIMRequestHandler.template = template
-        # set the encoding to a class variable of ZIMRequestHandler
-        ZIMRequestHandler.encoding = encoding
+        result = template.render(location="zim_list", body=body,
+                               head="", title="ZIM File Selection")
+        response.data = bytes(result, encoding=ZIMRequestHandler.encoding)
 
-        app = falcon.API()
-        main = ZIMRequestHandler()
-        # create a simple sync that forwards all requests; TODO: only allow GET
-        app.add_sink(main.on_get, prefix='/')
-        _address = 'localhost' if ip_address is None else ip_address
-        print(f'up and running on http://{_address}:{port}')
-        # start up the HTTP server on the desired port
-        pywsgi.WSGIServer((ip_address, port), app).serve_forever()
+    def _load_zim_file(self, zim_name):
+        """Load a ZIM file into memory"""
+        if zim_name not in ZIMRequestHandler.available_zims:
+            return False
 
-    def _bootstrap(self, index_file):
-        if not os.path.exists(index_file):  # check whether the index exists
-            logging.info("No index was found at " + str(index_file) +
+        zim_info = ZIMRequestHandler.available_zims[zim_name]
+
+        # Load the ZIM file
+        ZIMRequestHandler.zim_files[zim_name] = ZIMFile(zim_info["path"], ZIMRequestHandler.encoding)
+
+        # Load or create the index
+        ZIMRequestHandler.index_files[zim_name] = self._bootstrap_index(zim_info["path"], zim_info["index_path"])
+
+        return True
+
+    def _bootstrap_index(self, zim_path, index_path):
+        """Initialize an index for the given ZIM file"""
+        if not os.path.exists(index_path):
+            logging.info("No index was found at " + str(index_path) +
                          ", so now creating the index.")
             print("Please wait as the index is created, "
                   "this can take quite some time! - " + time.strftime('%X %x'))
 
-            db = sqlite3.connect(index_file)
+            db = sqlite3.connect(index_path)
             cursor = db.cursor()
             # limit memory usage to 64MB
             cursor.execute("PRAGMA CACHE_SIZE = -65536")
@@ -886,23 +939,106 @@ class ZIMServer:
             # and the porter tokeniser
             cursor.execute("CREATE VIRTUAL TABLE papers "
                            "USING fts4(content='', title, tokenize=porter);")
-            # get an iterator to access all the articles
-            articles = iter(self._zim_file)
 
-            for url, title, idx in articles:  # retrieve articles one by one
-                cursor.execute(
-                    "INSERT INTO papers(docid, title) VALUES (?, ?)",
-                    (idx, title))  # and add them
+            # Load the ZIM file if not already loaded
+            zim_name = os.path.basename(zim_path)
+            zim_name = os.path.splitext(zim_name)[0]
+            if zim_name not in ZIMRequestHandler.zim_files:
+                temp_zim = ZIMFile(zim_path, ZIMRequestHandler.encoding)
+                # get an iterator to access all the articles
+                articles = iter(temp_zim)
+
+                for url, title, idx in articles:  # retrieve articles one by one
+                    cursor.execute(
+                        "INSERT INTO papers(docid, title) VALUES (?, ?)",
+                        (idx, title))  # and add them
+
+                temp_zim.close()
+            else:
+                # get an iterator to access all the articles
+                articles = iter(ZIMRequestHandler.zim_files[zim_name])
+
+                for url, title, idx in articles:  # retrieve articles one by one
+                    cursor.execute(
+                        "INSERT INTO papers(docid, title) VALUES (?, ?)",
+                        (idx, title))  # and add them
+
             # once all articles are added, commit the changes to the database
             db.commit()
 
             print("Index created, continuing - " + time.strftime('%X %x'))
             db.close()
         # return an open connection to the SQLite database
-        return sqlite3.connect(index_file)
+        return sqlite3.connect(index_path)
+
+
+class ZIMServer:
+    def __init__(self, directory_path, template, index_base=None, ip_address=None, port=9454, encoding="utf-8"):
+        """
+        Initialize the ZIM server with a directory containing ZIM files
+
+        :param directory_path: Path to a directory containing ZIM files
+        :param template: Path to the HTML template file
+        :param index_base: Directory for storing index files (defaults to same as ZIM directory)
+        :param ip_address: IP address to bind the server to (default: localhost)
+        :param port: Port number to use (default: 9454)
+        :param encoding: Encoding to use (default: utf-8)
+        """
+        # Set the template to a class variable of ZIMRequestHandler
+        ZIMRequestHandler.template = template
+        # Set the encoding to a class variable of ZIMRequestHandler
+        ZIMRequestHandler.encoding = encoding
+
+        # Verify the path is a directory
+        if not os.path.isdir(directory_path):
+            raise ValueError(f"Path '{directory_path}' is not a directory. ZIMServer now only accepts directory paths.")
+
+        # Scan the directory for ZIM files
+        self._scan_zim_directory(directory_path, index_base)
+
+        # Check if we found any ZIM files
+        if not ZIMRequestHandler.available_zims:
+            logging.warning(f"No ZIM files found in directory {directory_path}")
+            print(f"Warning: No ZIM files found in {directory_path}")
+
+        app = falcon.API()
+        main = ZIMRequestHandler()
+        # create a simple sink that forwards all requests
+        app.add_sink(main.on_get, prefix='/')
+        _address = 'localhost' if ip_address is None else ip_address
+        print(f'ZIMServer running on http://{_address}:{port}')
+        print(f'Found {len(ZIMRequestHandler.available_zims)} ZIM file(s)')
+        # start up the HTTP server on the desired port
+        pywsgi.WSGIServer((_address, port), app).serve_forever()
+
+    def _scan_zim_directory(self, directory, index_base=None):
+        """Scan a directory for ZIM files"""
+        logging.info(f"Scanning directory {directory} for ZIM files")
+
+        for filename in os.listdir(directory):
+            if filename.endswith(".zim"):
+                filepath = os.path.join(directory, filename)
+                name = os.path.splitext(filename)[0]
+                file_size = os.path.getsize(filepath)
+
+                # Determine index path
+                if index_base:
+                    index_path = os.path.join(index_base, f"{name}.idx")
+                else:
+                    index_path = os.path.join(directory, f"{name}.idx")
+
+                ZIMRequestHandler.available_zims[name] = {
+                    "path": filepath,
+                    "index_path": index_path,
+                    "size": convert_size(file_size)
+                }
+
+                logging.info(f"Found ZIM file: {name} ({convert_size(file_size)})")
 
     def __exit__(self, *_):
-        self._zim_file.close()
+        """Ensure all ZIM files are properly closed"""
+        for zim_name, zim_file in ZIMRequestHandler.zim_files.items():
+            zim_file.close()
 
 # to start a ZIM server using ZIMply,
 # all you need to provide is the location of the ZIM file:
