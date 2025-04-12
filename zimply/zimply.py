@@ -44,7 +44,6 @@ import logging
 import lzma
 import zstandard
 import os
-import pkg_resources
 import re
 import sqlite3
 import time
@@ -806,7 +805,7 @@ class ZIMRequestHandler:
                     redirects = [entry for entry in redirects if
                                  entry['redirectIndex'] not in indexes]
 
-                    from itertools import chain 
+                    from itertools import chain
                     entries = list(chain(entries, redirects))
                     titles = [entry['title'] for entry in entries]
                     scores = self.bm25.calculate_scores(keywords, titles)
@@ -835,10 +834,7 @@ class ZIMRequestHandler:
 
 
 class ZIMServer:
-    def __init__(self, filename, index_file="",
-                 template=pkg_resources.resource_filename(
-                     __name__, 'template.html'),
-                 ip_address="", port=9454, encoding="utf-8"):
+    def __init__(self, filename, template, index_file=None, ip_address=None, port=9454, encoding="utf-8"):
         # create the object to access the ZIM file
         self._zim_file = ZIMFile(filename, encoding)
         # get the language of the ZIM file and convert it to ISO639_1 or
@@ -850,7 +846,7 @@ class ZIMServer:
         logging.info("A ZIM file in the language " + str(lang) +
                      " (ISO639-1) was found, " +
                      "containing " + str(len(self._zim_file)) + " articles.")
-        if not index_file:
+        if index_file is None:
             index_file = os.path.join(os.path.dirname(filename), "index.idx")
         logging.info("The index file is determined to be located at " +
                      str(index_file) + ".")
@@ -870,7 +866,7 @@ class ZIMServer:
         main = ZIMRequestHandler()
         # create a simple sync that forwards all requests; TODO: only allow GET
         app.add_sink(main.on_get, prefix='/')
-        _address = 'localhost' if ip_address == '' else ip_address
+        _address = 'localhost' if ip_address is None else ip_address
         print(f'up and running on http://{_address}:{port}')
         # start up the HTTP server on the desired port
         pywsgi.WSGIServer((ip_address, port), app).serve_forever()
@@ -914,7 +910,7 @@ class ZIMServer:
 
 # alternatively, you can specify your own location for the index,
 # use a custom template, or change the port:
-# server = ZIMServer("wiki.zim", "index.idx", "template.html", 80)
+# server = ZIMServer("wiki.zim", template="zimply/template.html", index_file="wiki.idx", port=8081)
 
 # all arguments can also be named,
 # so you can also choose to simply change the port:
